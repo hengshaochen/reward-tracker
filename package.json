@@ -1,0 +1,8 @@
+{
+  "name": "reward-ticket-monitoring",
+  "version": "1.0.0",
+  "private": true,
+  "dependencies": {
+    "@cloudflare/puppeteer": "^0.0.14"
+  }
+}
