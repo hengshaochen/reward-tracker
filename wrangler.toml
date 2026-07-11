@@ -8,7 +8,7 @@ binding = "BROWSER"
 
 [[kv_namespaces]]
 binding = "CACHE"
-id = "REPLACE_WITH_YOUR_KV_ID"
+id = "b674965e3d5144cf8b32386bbc6f83cf"
 
 [triggers]
 crons = ["*/30 * * * *"]
