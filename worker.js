@@ -1,131 +1,96 @@
 import puppeteer from "@cloudflare/puppeteer";
 
-function buildUrl(dateStr){
-  return `https://www.alaskaair.com/search/calendar?O=SEA&D=TPE&OD=${dateStr}&TripType=OneWay&Passengers=1&FareType=Partner&AwardType=Business&PayingWith=Points`;
-}
+function buildUrl(d){ return `https://www.alaskaair.com/search/calendar?O=SEA&D=TPE&OD=${d}&TripType=OneWay&Passengers=1&FareType=Partner&AwardType=Business&PayingWith=Points`; }
 
-async function safeScrape(env, dateStr){
-  let browser=null; let page=null;
+async function scrape(env, dateStr){
+  let browser=null, page=null;
+  let network=[];
   try{
     browser=await puppeteer.launch(env.BROWSER);
     page=await browser.newPage();
     await page.setUserAgent("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 Chrome/126.0.0.0 Safari/537.36");
+    page.on('response', async (res)=>{
+      try{
+        let u=res.url();
+        if(u.includes('alaska') && (u.includes('calendar')||u.includes('award')||u.includes('lox')||u.includes('/api/')||u.includes('shopping')||u.includes('availability'))){
+          network.push(u.slice(0,500));
+        }
+      }catch(e){}
+    });
     await page.goto(buildUrl(dateStr), {waitUntil:"domcontentloaded", timeout:35000});
-    await new Promise(function(r){ setTimeout(r, 6000); });
-
-    // 1st try: click dropdowns with SYNC evaluate (no async, no arrow that triggers __name)
-    let clicks=[];
+    await new Promise(r=>setTimeout(r,8000));
+    // Try to click with proper puppeteer click (not evaluate)
     try{
-      clicks = await page.evaluate(function(){
-        var logs=[];
-        var all = document.querySelectorAll('button, div, span, [role="combobox"]');
-        var fareBtn=null, payBtn=null;
-        for(var i=0;i<all.length;i++){
-          var el=all[i];
-          var txt=(el.innerText||"").trim();
-          if(!txt) continue;
-          if(txt.indexOf("Fare type")!==-1 && el.offsetParent!==null && !fareBtn) fareBtn=el;
-          if(txt.indexOf("Paying with")!==-1 && el.offsetParent!==null && !payBtn) payBtn=el;
-        }
-        if(fareBtn){ fareBtn.click(); logs.push("clicked Fare type"); }
-        return logs;
+      // Find Fare type combobox via text
+      let fareHandle = await page.evaluateHandle(()=>{
+        let els=document.querySelectorAll('button, [role="combobox"]');
+        for(let el of els){ if((el.innerText||"").includes("Fare type")) return el; }
+        return null;
       });
-    }catch(e){ clicks.push("fare click err:"+String(e).slice(0,200)); }
-
-    await new Promise(function(r){ setTimeout(r, 1200); });
-
-    try{
-      await page.evaluate(function(){
-        var opts=document.querySelectorAll('li, button, div[role="option"], span');
-        for(var i=0;i<opts.length;i++){
-          var t=(opts[i].innerText||"").trim();
-          if(t==="Partner Business"){ opts[i].click(); break; }
-        }
-      });
-      clicks.push("selected Partner Business");
-    }catch(e){}
-
-    await new Promise(function(r){ setTimeout(r, 1500); });
-
-    try{
-      await page.evaluate(function(){
-        var all=document.querySelectorAll('button, div, span');
-        for(var i=0;i<all.length;i++){
-          var txt=(all[i].innerText||"").trim();
-          if(txt.indexOf("Paying with")!==-1 && all[i].offsetParent!==null){ all[i].click(); break; }
-        }
-      });
-    }catch(e){}
-
-    await new Promise(function(r){ setTimeout(r, 1200); });
-
-    try{
-      await page.evaluate(function(){
-        var opts=document.querySelectorAll('li, button, div[role="option"], span');
-        for(var i=0;i<opts.length;i++){
-          var t=(opts[i].innerText||"").trim();
-          if(t==="Points"||t==="Miles"){ opts[i].click(); break; }
-        }
-      });
-      clicks.push("selected Points");
-    }catch(e){}
-
-    await new Promise(function(r){ setTimeout(r, 6000); });
-
-    var info = await page.evaluate(function(){
-      var txt=document.body.innerText||"";
-      return {
-        title: document.title,
-        url: location.href,
-        bodyLen: document.documentElement.innerHTML.length,
-        snippet: txt.slice(0,3000),
-        hasAward: txt.indexOf("award")!==-1,
-        hasK: txt.indexOf("k +$")!==-1 || txt.indexOf("K +$")!==-1
-      };
-    });
-
-    var parsed = await page.evaluate(function(){
-      var out=[];
-      var cells=document.querySelectorAll('[role="gridcell"], button, div');
-      for(var i=0;i<cells.length;i++){
-        var c=cells[i];
-        var t=(c.innerText||"").trim();
-        if(!t) continue;
-        if(t.length>30) continue;
-        if(/\d+k\s*\+\s*\$\d+/i.test(t)){
-          out.push({raw:t, miles:(t.match(/\d+k/i)||[""])[0].toLowerCase()});
-        }
+      if(fareHandle && fareHandle.asElement()){
+        try{ await fareHandle.asElement().click(); }catch(e){}
       }
-      var uniq=[]; var seen={};
-      for(var j=0;j<out.length;j++){ if(!seen[out[j].raw]){ seen[out[j].raw]=1; uniq.push(out[j]); } }
-      var full= (document.body.innerText||"").indexOf("75k")!==-1;
-      return {list:uniq, has75:full};
+    }catch(e){}
+    await new Promise(r=>setTimeout(r,1000));
+    try{
+      // try to find Partner Business option in DOM after open
+      let opt = await page.$('li ::-p-text(Partner Business)');
+      if(opt) await opt.click();
+      else {
+        await page.evaluate(()=>{
+          let opts=document.querySelectorAll('li, [role="option"], button');
+          for(let o of opts){ if((o.innerText||"").trim()==="Partner Business"){ o.dispatchEvent(new MouseEvent('mousedown',{bubbles:true})); o.dispatchEvent(new MouseEvent('mouseup',{bubbles:true})); o.click(); break; } }
+        });
+      }
+    }catch(e){}
+    await new Promise(r=>setTimeout(r,2000));
+
+    let perf = await page.evaluate(()=>{
+      let entries=[];
+      try{ entries=performance.getEntriesByType('resource').map(e=>e.name).filter(n=>n.includes('alaska')||n.includes('calendar')||n.includes('award')).slice(0,30); }catch(e){}
+      let txt=document.body.innerText||"";
+      return {title:document.title, url:location.href, len:document.documentElement.innerHTML.length, snippet:txt.slice(0,2000), entries:entries, hasAward:txt.includes("award"), hasK:txt.includes("k +$")};
     });
 
-    return {ok:true, results:parsed.list, has75:parsed.has75, debug:info, clicks:clicks, error:""};
+    // Try direct fetch of known Alaska internal endpoints inside browser context
+    let apiAttempts=[];
+    try{
+      apiAttempts = await page.evaluate(async (d)=>{
+        let urls=[
+          `/api/award/calendar?origin=SEA&destination=TPE&departureDate=${d}&tripType=OneWay`,
+          `/lox/api/award/calendar?O=SEA&D=TPE&OD=${d}`,
+          `/api/shopping/awardCalendar?origin=SEA&destination=TPE&departDate=${d}`,
+          `https://www.alaskaair.com/api/award/calendar?origin=SEA&destination=TPE&departureDate=${d}`
+        ];
+        let results=[];
+        for(let u of urls){
+          try{
+            let r=await fetch(u,{credentials:'include'});
+            let t=await r.text();
+            results.push({url:u, status:r.status, len:t.length, sample:t.slice(0,500)});
+            if(t.includes("75")||t.includes("75k")) break;
+          }catch(e){ results.push({url:u, error:String(e).slice(0,200)}); }
+        }
+        return results;
+      }, dateStr);
+    }catch(e){ apiAttempts=[{error:String(e).slice(0,500)}]; }
+
+    return {ok:true, network:network, perf:perf, apiAttempts:apiAttempts};
   }catch(e){
-    return {ok:false, results:[], has75:false, debug:{title:"",url:buildUrl(dateStr),bodyLen:0,snippet:String(e).slice(0,2000),hasAward:false,hasK:false}, clicks:[], error:String(e).slice(0,2000)};
-  }finally{
-    try{ if(page) await page.close(); }catch(e){}
-    try{ if(browser) await browser.close(); }catch(e){}
-  }
+    return {ok:false, error:String(e).slice(0,2000), stack:e.stack?.slice(0,2000), network:network};
+  }finally{ try{if(page) await page.close();}catch{} try{if(browser) await browser.close();}catch{} }
 }
 
 export default {
-  async fetch(request, env, ctx){
+  async fetch(req, env){
     try{
-      var u=new URL(request.url);
-      if(u.pathname==="/api/test-browser"){
-        var b=await puppeteer.launch(env.BROWSER); var p=await b.newPage(); await p.goto("https://example.com",{waitUntil:"domcontentloaded",timeout:10000}); var t=await p.title(); await b.close(); return new Response(JSON.stringify({ok:true,browserWorks:true,title:t}),{headers:{"content-type":"application/json"}});
-      }
+      let u=new URL(req.url);
       if(u.pathname==="/api/check"){
-        var d=u.searchParams.get("date")||"2026-07-22";
-        var r=await safeScrape(env,d);
-        return new Response(JSON.stringify({ok:true,mode:"REAL_V4_NO__NAME",date:d,clicks:r.clicks,allCount:r.results.length,all:r.results,has75inPage:r.has75,debug:"title:"+r.debug.title+"\nurl:"+r.debug.url+"\nbodyLen:"+r.debug.bodyLen+"\nhasAward:"+r.debug.hasAward+" hasK:"+r.debug.hasK+"\nclicks:"+(r.clicks||[]).join("|")+"\nerror:"+r.error+"\nsnippet:"+(r.debug.snippet||"").slice(0,1500),error:r.error},null,2),{headers:{"content-type":"application/json"}});
+        let d=u.searchParams.get("date")||"2026-07-22";
+        let r=await scrape(env,d);
+        return new Response(JSON.stringify(r,null,2),{headers:{"content-type":"application/json"}});
       }
-      return new Response("alive v4 no __name. /api/check?date=2026-07-22",{headers:{"content-type":"text/plain"}});
-    }catch(e){
-      return new Response(JSON.stringify({ok:false,fatal:String(e),stack:(e.stack||"").slice(0,2000)}),{status:500,headers:{"content-type":"application/json"}});
-    }
+      return new Response("v5 network sniff. /api/check?date=2026-07-22",{headers:{"content-type":"text/plain"}});
+    }catch(e){ return new Response(JSON.stringify({fatal:String(e),stack:e.stack?.slice(0,2000)}),{status:500,headers:{"content-type":"application/json"}}); }
   }
 }
