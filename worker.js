@@ -59,6 +59,33 @@ async function scrapeAward(env, dateStr){
   }
 }
 
+function htmlDashboard(){
+return `<!DOCTYPE html><html lang="zh-Hant"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>STARLUX 75K Tracker</title><style>body{font-family:-apple-system,BlinkMacSystemFont,Segoe UI,Roboto,Helvetica,Arial,sans-serif;background:#f6f8fb;margin:0;padding:24px;color:#111}.card{max-width:980px;margin:0 auto;background:#fff;border-radius:16px;box-shadow:0 8px 24px rgba(0,0,0,.08);padding:24px}h1{font-size:22px;margin:0 0 8px}.sub{color:#666;font-size:14px;margin-bottom:18px}.row{display:flex;gap:12px;flex-wrap:wrap;margin-bottom:16px}input,button{padding:10px 14px;border-radius:10px;border:1px solid #ddd;font-size:14px}button{background:#0a7cff;color:#fff;border:none;cursor:pointer;font-weight:600}button:disabled{opacity:.5}.badge{display:inline-block;padding:4px 10px;border-radius:999px;font-size:12px;font-weight:700}.ok{background:#e6f7e9;color:#1a7a2a}.warn{background:#fff3cd;color:#8a6d00}.bad{background:#fde8e8;color:#a00}.grid{display:grid;grid-template-columns:repeat(7,1fr);gap:8px;margin-top:16px}.cell{border:1px solid #eee;border-radius:10px;padding:10px;min-height:64px;background:#fafcff}.cell small{color:#888;display:block}.cell b{font-size:15px}.cell.hit{background:#e8ffe9;border-color:#5ccf6a}.cell.na{opacity:.45}pre{white-space:pre-wrap;word-break:break-all;background:#f5f7fb;padding:12px;border-radius:10px;font-size:12px;max-height:260px;overflow:auto}a{color:#0a7cff;text-decoration:none}</style></head><body><div class="card"><h1>SEA to TPE STARLUX 75K Tracker <span id="status" class="badge warn">idle</span></h1><div class="sub">Using ShoppingMethod=onlineaward & FareType=Partner Business | Alaska Lowest available award fares</div><div class="row"><input id="date" type="date" value="2026-07-22"><button id="btn">Scan Now</button><button id="btn2" style="background:#111">Scan next 7 days</button><a href="/api/check?date=2026-07-22" target="_blank" style="align-self:center">Raw JSON</a></div><div id="meta" class="sub"></div><div id="grid" class="grid"></div><h3>allK fares</h3><pre id="allk"></pre><h3>Debug</h3><pre id="dbg"></pre></div><script>
+const $=s=>document.querySelector(s);
+function renderCalendar(all){
+  const grid=$("#grid"); grid.innerHTML="";
+  const map={}; (all||[]).forEach(a=>{ map[parseInt(a.day)]=a.fare; });
+  for(let d=1;d<=31;d++){ let fare=map[d]||"N/A"; let div=document.createElement("div"); div.className="cell"+(fare==="N/A"?" na":"")+(fare.toLowerCase().includes("75k")?" hit":""); div.innerHTML="<small>"+d+"</small><b>"+fare+"</b>"; grid.appendChild(div); }
+}
+async function check(date){
+  $("#status").textContent="scanning..."; $("#status").className="badge warn"; $("#btn").disabled=true;
+  try{
+    let r=await fetch("/api/check?date="+date).then(r=>r.json());
+    $("#meta").innerHTML="isAward: <b>"+r.isAwardPage+"</b> | allCount: "+r.allCount+" | has75: "+r.has75inPage+" | <a target=_blank href='"+r.url+"'>Alaska source</a>";
+    renderCalendar(r.all);
+    document.getElementById("allk").textContent=JSON.stringify(r.allK,null,2);
+    document.getElementById("dbg").textContent=r.debug;
+    if(r.matchedCount>0){ $("#status").textContent="FOUND "+r.matchedCount+" x 75K!"; $("#status").className="badge ok"; }
+    else { $("#status").textContent="no 75k ("+r.allCount+" fares)"; $("#status").className="badge bad"; }
+  }catch(e){ $("#status").textContent="error"; document.getElementById("dbg").textContent=String(e); }
+  $("#btn").disabled=false;
+}
+document.getElementById("btn").onclick=()=>check(document.getElementById("date").value);
+document.getElementById("btn2").onclick=async()=>{ let base=new Date(document.getElementById("date").value); for(let i=0;i<7;i++){ let d=new Date(base); d.setDate(base.getDate()+i); let s=d.toISOString().slice(0,10); await check(s); await new Promise(r=>setTimeout(r,1200)); } };
+check(document.getElementById("date").value);
+<\/script></body></html>`;
+}
+
 export default {
   async fetch(req, env){
     try{
@@ -85,7 +112,10 @@ export default {
           error:r.error
         },null,2),{headers:{"content-type":"application/json"}});
       }
-      return new Response("alive FINAL v2 regex. /api/check?date=2026-07-20",{headers:{"content-type":"text/plain"}});
+      if(u.pathname==="/api/test-browser"){
+        let b=await puppeteer.launch(env.BROWSER); let p=await b.newPage(); await p.goto("https://example.com",{waitUntil:"domcontentloaded",timeout:10000}); let t=await p.title(); await b.close(); return new Response(JSON.stringify({ok:true,browserWorks:true,title:t}),{headers:{"content-type":"application/json"}});
+      }
+      return new Response(htmlDashboard(),{headers:{"content-type":"text/html; charset=utf-8"}});
     }catch(e){ return new Response(JSON.stringify({fatal:String(e),stack:e.stack?.slice(0,2000)}),{status:500,headers:{"content-type":"application/json"}}); }
   },
   async scheduled(event, env, ctx){
