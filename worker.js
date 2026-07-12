@@ -1,112 +1,131 @@
 import puppeteer from "@cloudflare/puppeteer";
 
-function buildUrl(dateStr) {
-  // 先用最寬鬆的 URL，再靠頁面點擊切到哩程
-  return `https://www.alaskaair.com/search/calendar?O=SEA&D=TPE&OD=${dateStr}&TripType=OneWay&Passengers=1`;
+function buildUrl(dateStr){
+  return `https://www.alaskaair.com/search/calendar?O=SEA&D=TPE&OD=${dateStr}&TripType=OneWay&Passengers=1&FareType=Partner&AwardType=Business&PayingWith=Points`;
 }
 
-async function safeScrape(env, dateStr) {
-  let browser = null;
-  let page = null;
-  try {
-    browser = await puppeteer.launch(env.BROWSER);
-    page = await browser.newPage();
+async function safeScrape(env, dateStr){
+  let browser=null; let page=null;
+  try{
+    browser=await puppeteer.launch(env.BROWSER);
+    page=await browser.newPage();
     await page.setUserAgent("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 Chrome/126.0.0.0 Safari/537.36");
-    await page.goto(buildUrl(dateStr), { waitUntil: "domcontentloaded", timeout: 35000 });
-    await new Promise(r => setTimeout(r, 5000));
+    await page.goto(buildUrl(dateStr), {waitUntil:"domcontentloaded", timeout:35000});
+    await new Promise(function(r){ setTimeout(r, 6000); });
 
-    // 自動點 Fare type -> Partner Business / Award Business
-    const clicked = await page.evaluate(async () => {
-      const logs = [];
-      function findClickable(text) {
-        const els = Array.from(document.querySelectorAll('button, div, span, [role="combobox"], [role="button"]'));
-        return els.find(e => (e.innerText||"").trim().toLowerCase().includes(text.toLowerCase()) && e.offsetParent !== null);
-      }
-      function findOption(text) {
-        const els = Array.from(document.querySelectorAll('li, button, div[role="option"], span'));
-        return els.find(e => (e.innerText||"").trim().toLowerCase() === text.toLowerCase() || (e.innerText||"").toLowerCase().includes(text.toLowerCase()));
-      }
-      // 1. Fare type
-      let fareBtn = findClickable("Fare type");
-      if (fareBtn) { fareBtn.click(); logs.push("clicked Fare type"); await new Promise(r=>setTimeout(r,800));
-        let opt = findOption("Partner Business") || findOption("Partner") || findOption("Business");
-        if (opt) { opt.click(); logs.push("selected "+opt.innerText); await new Promise(r=>setTimeout(r,1500)); }
-      }
-      // 2. Paying with
-      let payBtn = findClickable("Paying with");
-      if (payBtn) { payBtn.click(); logs.push("clicked Paying with"); await new Promise(r=>setTimeout(r,800));
-        let opt2 = findOption("Points") || findOption("Miles");
-        if (opt2) { opt2.click(); logs.push("selected "+opt2.innerText); await new Promise(r=>setTimeout(r,2000)); }
-      }
-      return logs;
-    });
+    // 1st try: click dropdowns with SYNC evaluate (no async, no arrow that triggers __name)
+    let clicks=[];
+    try{
+      clicks = await page.evaluate(function(){
+        var logs=[];
+        var all = document.querySelectorAll('button, div, span, [role="combobox"]');
+        var fareBtn=null, payBtn=null;
+        for(var i=0;i<all.length;i++){
+          var el=all[i];
+          var txt=(el.innerText||"").trim();
+          if(!txt) continue;
+          if(txt.indexOf("Fare type")!==-1 && el.offsetParent!==null && !fareBtn) fareBtn=el;
+          if(txt.indexOf("Paying with")!==-1 && el.offsetParent!==null && !payBtn) payBtn=el;
+        }
+        if(fareBtn){ fareBtn.click(); logs.push("clicked Fare type"); }
+        return logs;
+      });
+    }catch(e){ clicks.push("fare click err:"+String(e).slice(0,200)); }
 
-    await new Promise(r => setTimeout(r, 5000));
+    await new Promise(function(r){ setTimeout(r, 1200); });
 
-    const info = await page.evaluate(() => {
+    try{
+      await page.evaluate(function(){
+        var opts=document.querySelectorAll('li, button, div[role="option"], span');
+        for(var i=0;i<opts.length;i++){
+          var t=(opts[i].innerText||"").trim();
+          if(t==="Partner Business"){ opts[i].click(); break; }
+        }
+      });
+      clicks.push("selected Partner Business");
+    }catch(e){}
+
+    await new Promise(function(r){ setTimeout(r, 1500); });
+
+    try{
+      await page.evaluate(function(){
+        var all=document.querySelectorAll('button, div, span');
+        for(var i=0;i<all.length;i++){
+          var txt=(all[i].innerText||"").trim();
+          if(txt.indexOf("Paying with")!==-1 && all[i].offsetParent!==null){ all[i].click(); break; }
+        }
+      });
+    }catch(e){}
+
+    await new Promise(function(r){ setTimeout(r, 1200); });
+
+    try{
+      await page.evaluate(function(){
+        var opts=document.querySelectorAll('li, button, div[role="option"], span');
+        for(var i=0;i<opts.length;i++){
+          var t=(opts[i].innerText||"").trim();
+          if(t==="Points"||t==="Miles"){ opts[i].click(); break; }
+        }
+      });
+      clicks.push("selected Points");
+    }catch(e){}
+
+    await new Promise(function(r){ setTimeout(r, 6000); });
+
+    var info = await page.evaluate(function(){
+      var txt=document.body.innerText||"";
       return {
         title: document.title,
         url: location.href,
         bodyLen: document.documentElement.innerHTML.length,
-        snippet: (document.body.innerText||"").slice(0,3000),
-        hasAwardWord: document.body.innerText.includes("award"),
-        hasK: document.body.innerText.includes("k +$"),
+        snippet: txt.slice(0,3000),
+        hasAward: txt.indexOf("award")!==-1,
+        hasK: txt.indexOf("k +$")!==-1 || txt.indexOf("K +$")!==-1
       };
     });
 
-    const results = await page.evaluate(() => {
-      const out = [];
-      const text = document.body.innerText;
-      // 日曆格
-      const cells = document.querySelectorAll('div, button, [role="gridcell"]');
-      cells.forEach(c=>{
-        const t=(c.innerText||"").trim();
-        if (!t) return;
-        if (t.length>80) return; // 避免抓到整個頁面
-        // 匹配 75k +$26 / 175k +$26 / 250k +$26
-        if (/\d+k\s*\+\s*\$\d+/i.test(t)) {
-          out.push({ raw:t, miles: (t.match(/\d+k/i)||[""])[0].toLowerCase() });
+    var parsed = await page.evaluate(function(){
+      var out=[];
+      var cells=document.querySelectorAll('[role="gridcell"], button, div');
+      for(var i=0;i<cells.length;i++){
+        var c=cells[i];
+        var t=(c.innerText||"").trim();
+        if(!t) continue;
+        if(t.length>30) continue;
+        if(/\d+k\s*\+\s*\$\d+/i.test(t)){
+          out.push({raw:t, miles:(t.match(/\d+k/i)||[""])[0].toLowerCase()});
         }
-      });
-      // 去重
-      const uniq = [];
-      const seen = new Set();
-      out.forEach(o=>{ if(!seen.has(o.raw)){ seen.add(o.raw); uniq.push(o);} });
-      return { list: uniq, fullHas75: /75k\s*\+\s*\$26/i.test(text) };
+      }
+      var uniq=[]; var seen={};
+      for(var j=0;j<out.length;j++){ if(!seen[out[j].raw]){ seen[out[j].raw]=1; uniq.push(out[j]); } }
+      var full= (document.body.innerText||"").indexOf("75k")!==-1;
+      return {list:uniq, has75:full};
     });
 
-    return { ok:true, results: results.list, fullHas75: results.fullHas75, debug: info, clicks: clicked, error:"" };
-  } catch(e) {
-    return { ok:false, results:[], fullHas75:false, debug:{ title:"", url:buildUrl(dateStr), bodyLen:0, snippet:String(e).slice(0,2000)}, clicks:[], error:String(e).slice(0,1500) };
-  } finally {
-    try{ if(page) await page.close(); }catch{}
-    try{ if(browser) await browser.close(); }catch{}
+    return {ok:true, results:parsed.list, has75:parsed.has75, debug:info, clicks:clicks, error:""};
+  }catch(e){
+    return {ok:false, results:[], has75:false, debug:{title:"",url:buildUrl(dateStr),bodyLen:0,snippet:String(e).slice(0,2000),hasAward:false,hasK:false}, clicks:[], error:String(e).slice(0,2000)};
+  }finally{
+    try{ if(page) await page.close(); }catch(e){}
+    try{ if(browser) await browser.close(); }catch(e){}
   }
 }
 
 export default {
-  async fetch(request, env, ctx) {
-    try {
-      const url = new URL(request.url);
-      if (url.pathname === "/api/test-browser") {
-        const b=await puppeteer.launch(env.BROWSER); const p=await b.newPage(); await p.goto("https://example.com",{waitUntil:"domcontentloaded",timeout:10000}); const t=await p.title(); await b.close(); return new Response(JSON.stringify({ok:true,browserWorks:true,title:t}),{headers:{"content-type":"application/json"}});
+  async fetch(request, env, ctx){
+    try{
+      var u=new URL(request.url);
+      if(u.pathname==="/api/test-browser"){
+        var b=await puppeteer.launch(env.BROWSER); var p=await b.newPage(); await p.goto("https://example.com",{waitUntil:"domcontentloaded",timeout:10000}); var t=await p.title(); await b.close(); return new Response(JSON.stringify({ok:true,browserWorks:true,title:t}),{headers:{"content-type":"application/json"}});
       }
-      if (url.pathname === "/api/check") {
-        const date = url.searchParams.get("date") || "2026-07-22";
-        const r = await safeScrape(env, date);
-        return new Response(JSON.stringify({
-          ok:true, mode:"REAL_AWARD_FIX", date,
-          clicks: r.clicks,
-          allCount: r.results.length,
-          all: r.results,
-          has75inPage: r.fullHas75,
-          debug: `title:${r.debug.title}\nurl:${r.debug.url}\nbodyLen:${r.debug.bodyLen}\nhasAward:${r.debug.hasAwardWord} hasK:${r.debug.hasK}\nclicks:${(r.clicks||[]).join("|")}\nerror:${r.error}\nsnippet:${(r.debug.snippet||"").slice(0,1200)}`,
-          error: r.error
-        }, null, 2), {headers:{"content-type":"application/json"}});
+      if(u.pathname==="/api/check"){
+        var d=u.searchParams.get("date")||"2026-07-22";
+        var r=await safeScrape(env,d);
+        return new Response(JSON.stringify({ok:true,mode:"REAL_V4_NO__NAME",date:d,clicks:r.clicks,allCount:r.results.length,all:r.results,has75inPage:r.has75,debug:"title:"+r.debug.title+"\nurl:"+r.debug.url+"\nbodyLen:"+r.debug.bodyLen+"\nhasAward:"+r.debug.hasAward+" hasK:"+r.debug.hasK+"\nclicks:"+(r.clicks||[]).join("|")+"\nerror:"+r.error+"\nsnippet:"+(r.debug.snippet||"").slice(0,1500),error:r.error},null,2),{headers:{"content-type":"application/json"}});
       }
-      return new Response("alive v3 award-fix. /api/check?date=2026-07-22",{headers:{"content-type":"text/plain"}});
-    } catch(e){
-      return new Response(JSON.stringify({ok:false,fatal:String(e),stack:e.stack?.slice(0,1500)}),{status:500,headers:{"content-type":"application/json"}});
+      return new Response("alive v4 no __name. /api/check?date=2026-07-22",{headers:{"content-type":"text/plain"}});
+    }catch(e){
+      return new Response(JSON.stringify({ok:false,fatal:String(e),stack:(e.stack||"").slice(0,2000)}),{status:500,headers:{"content-type":"application/json"}});
     }
   }
 }
